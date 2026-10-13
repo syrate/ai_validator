@@ -13,7 +13,7 @@ import openai
 from src.app.validators.base_validator import BaseValidator
 from src.app.settings import settings
 import instructor
-from instructor.core.exceptions import InstructorRetryException
+from instructor.retry import InstructorRetryException
 import time
 nvidia_api_key = settings.nvidia_nim_api_key
 

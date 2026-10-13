@@ -1,3 +1,5 @@
+import os
+
 from fastapi import APIRouter, HTTPException, Depends
 from anyio import to_thread
 from src.app.models import ValidateRequest, ValidateResponse, ValidatorResult, NvidiaAttributesRequest
@@ -8,11 +10,20 @@ from src.app.validators.nvidia_validator import NvidiaValidator
 from src.app.deps.auth import api_key_auth
 
 router = APIRouter()
+
+# Which VLM backend handles /validate/attributes (car/body/face extraction).
+# "qwen" (default, unchanged behavior) or "gemini".
+ATTRIBUTES_VLM_PROVIDER = os.getenv("ATTRIBUTES_VLM_PROVIDER", "qwen").lower()
+
+_openai_validator = OpenAIValidator()
+_gemini_validator = GeminiValidator()
+_nvidia_validator = NvidiaValidator()
+
 VALIDATORS = {
-    "openai": OpenAIValidator(),
-    "gemini": GeminiValidator(),
-    "nvidia": NvidiaValidator(),
-    "attributes": NvidiaValidator(),
+    "openai": _openai_validator,
+    "gemini": _gemini_validator,
+    "nvidia": _nvidia_validator,
+    "attributes": _gemini_validator if ATTRIBUTES_VLM_PROVIDER == "gemini" else _nvidia_validator,
 }
 
 @router.post("/validate", response_model=ValidateResponse, dependencies=[Depends(api_key_auth)])
