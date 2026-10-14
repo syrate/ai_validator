@@ -39,7 +39,7 @@ def create_app() -> FastAPI:
 
     @app.get("/healthz", response_class=PlainTextResponse)
     async def healthz() -> str:
-        return {"status": "ok"}
+        return "ok"
 
     return app
 
