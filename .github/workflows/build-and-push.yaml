@@ -1,0 +1,51 @@
+name: Build and push ai_validator image to GCP Artifact Registry
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: ai-validator
+
+jobs:
+  package_gcp:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Google auth
+        id: gcp-auth
+        uses: google-github-actions/auth@v3
+        with:
+          token_format: 'access_token'
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_ARTIFACT_MANAGER_SA }}
+
+      - name: Install gcloud CLI
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Configure Docker for GCP Artifact Registry
+        run: |
+          gcloud auth configure-docker ${{ secrets.GCP_ARTIFACT_REGISTRY_REGION }}-docker.pkg.dev --quiet
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta-gcp
+        uses: docker/metadata-action@v5
+        with:
+          images: "${{ secrets.GCP_ARTIFACT_REGISTRY_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REGISTRY_NAME }}/${{ env.IMAGE_NAME }}"
+
+      - name: Build and push Docker image to GCP Artifact Registry
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta-gcp.outputs.tags }}
+          labels: ${{ steps.meta-gcp.outputs.labels }}

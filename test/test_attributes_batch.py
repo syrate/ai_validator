@@ -12,8 +12,8 @@ project_root = Path(__file__).resolve().parent.parent
 print("Project root:", project_root)
 
 # Keep the endpoint as requested
-# URL = "http://localhost:8080/validate/attributes"
-URL = "https://ai-validator-654942414948.europe-west9.run.app/validate/attributes"
+URL = "http://localhost:8000/validate/attributes"
+# URL = "https://ai-validator-654942414948.europe-west9.run.app/validate/attributes"
 
 def is_image_file(p: Path, extensions=(".jpg", ".jpeg", ".png", ".bmp", ".tiff")) -> bool:
     return p.is_file() and p.suffix.lower() in extensions

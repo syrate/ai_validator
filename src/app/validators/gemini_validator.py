@@ -4,6 +4,7 @@
 # import google.generativeai as gemini
 # import json
 import os
+import re
 import cv2
 import json
 import ultralytics
@@ -14,6 +15,7 @@ from PIL import Image
 from ultralytics.utils.downloads import safe_download
 from ultralytics.utils.plotting import Annotator, colors
 from src.app.validators.base_validator import BaseValidator
+from src.app.validators.nvidia_validator import SERVEYE_PROMPT_ATTRIBUTES
 from src.app.settings import settings
 google_api_key = settings.google_api_key
 
@@ -23,6 +25,54 @@ class GeminiValidator(BaseValidator):
         # super().__init__(base_model="gemini-2.5-pro")
         self.client = genai.Client(api_key=google_api_key)
         self.base_model ="gemini-2.5-pro"
+
+    def _call_gemini_attributes(self, image: Image.Image, detection_type: str) -> dict:
+        """Call Gemini to extract car/body/face attributes.
+
+        Mirrors NvidiaValidator's __call_qwen contract so both are interchangeable
+        behind VALIDATORS["attributes"]: returns
+        {"success": bool, "content": {"detection_type": ..., "attributes": {...}}}
+        on success, or {"success": False, "error": ...} on failure.
+        """
+        prompt = f"{SERVEYE_PROMPT_ATTRIBUTES.strip()}\n\ndetection_type: \"{detection_type}\""
+
+        try:
+            response = self.client.models.generate_content(
+                model=self.base_model,
+                contents=[prompt, image],
+                config=types.GenerateContentConfig(temperature=0.3),
+            )
+            raw_output = response.text
+            if not raw_output:
+                return {"success": False, "error": "Empty response from Gemini"}
+
+            cleaned = re.sub(r"```(?:json)?\s*", "", raw_output)
+            cleaned = cleaned.replace("```", "").strip()
+
+            try:
+                parsed = json.loads(cleaned)
+            except json.JSONDecodeError:
+                return {"success": False, "error": f"Invalid JSON from Gemini: {cleaned[:200]}"}
+
+            attributes = parsed.get("attributs", parsed.get("attributes", {}))
+            return {
+                "success": True,
+                "content": {
+                    "detection_type": parsed.get("detection_type", detection_type),
+                    "attributes": attributes,
+                },
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Unexpected error calling Gemini: {e}"}
+
+    def attributes_car(self, image: Image.Image) -> dict:
+        return self._call_gemini_attributes(image, "car")
+
+    def attributes_body(self, image: Image.Image) -> dict:
+        return self._call_gemini_attributes(image, "body")
+
+    def attributes_face(self, image: Image.Image) -> dict:
+        return self._call_gemini_attributes(image, "face")
 
     async def validate(self, image: Image.Image,task: str) -> dict:
         """

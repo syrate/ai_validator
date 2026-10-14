@@ -13,7 +13,7 @@ import openai
 from src.app.validators.base_validator import BaseValidator
 from src.app.settings import settings
 import instructor
-from instructor.core.exceptions import InstructorRetryException
+from instructor.retry import InstructorRetryException
 import time
 nvidia_api_key = settings.nvidia_nim_api_key
 
@@ -129,6 +129,8 @@ class NvidiaValidator(BaseValidator):
     def __init__(self):
         self.endpoint = settings.nvidia_nim_endpoint
         self.api_key = settings.nvidia_nim_api_key
+        self.vlm_url = settings.vlm_url
+        self.vlm_api_key = settings.vlm_api_key
         self.openai = OpenAI(base_url=self.endpoint, api_key=self.api_key)
         self.instructor_client = instructor.from_openai(self.openai)
         self.retry = [30,60,120,240]
@@ -285,15 +287,145 @@ class NvidiaValidator(BaseValidator):
             print(f"Unexpected error in _call_nemotron: {traceback.format_exc()}")
             return {"success": False, "error": f"Unexpected error: {str(e)}"}
 
-    # Public convenience methods per detection type
+    def __call_qwen(self, image: Image.Image, detection_type: str) -> dict:
+        """
+        Call Qwen3-VL (Cloud Run) endpoint to extract attributes.
+
+        This function mirrors the behaviour of vlm_client.get_attributes:
+        - encodes the image as data:image/jpeg;base64,...
+        - sends a small prompt depending on detection_type
+        - cleans markdown fences from the model response and attempts to parse JSON
+        - returns {"success": bool, "content": {"detection_type": ..., "attributes": {...}}}
+        """
+        # Determine Cloud Run URL / API key from env
+        # vlm_url = os.getenv("VLM_URL")
+        # api_key = os.getenv("VLM_API_KEY")
+        if not self.vlm_url:
+            return {"success": False, "error": "VLM endpoint not configured (set VLM_URL or VLM_CLOUD_RUN_URL)"}
+
+        # encode image as base64
+        try:
+            buf = io.BytesIO()
+            image.save(buf, format="JPEG")
+            image_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        except Exception as e:
+            return {"success": False, "error": f"Image encoding failed: {e}"}
+
+        # simple prompt builder (kept small and compatible with vlm_client._build_prompt)
+        if detection_type == "face":
+            prompt = (
+                "Analysez ce visage et extrayez les attributs suivants.\n"
+                "Répondez UNIQUEMENT en FRANÇAIS avec un objet JSON valide, sans balises Markdown ni explication :\n"
+                "{\n"
+                '  "sexe": "homme ou femme",\n'
+                '  "age": "tranche d\'âge comme 25-34",\n'
+                '  "teint_de_peau": "clair, brun moyen ou foncé",\n'
+                '  "coiffure": "description de la coiffure",\n'
+                '  "barbe": "Oui ou Non",\n'
+                '  "moustache": "Oui ou Non",\n'
+                '  "chapeau": "Oui ou Non",\n'
+                '  "capuche": "Oui ou Non",\n'
+                '  "masque": "Oui ou Non",\n'
+                '  "lunettes": "Oui ou Non"\n'
+                "}"
+            )
+        elif detection_type == "body":
+            prompt = (
+                "Analysez la tenue de cette personne et extrayez les attributs suivants.\n"
+                "Répondez UNIQUEMENT en FRANÇAIS avec un objet JSON valide, sans balises Markdown ni explication :\n"
+                "{\n"
+                '  "couleur_haut": "couleur du vêtement supérieur",\n'
+                '  "type_haut": "type de vêtement supérieur (ex. chemise, t-shirt, robe)",\n'
+                '  "couleur_bas": "couleur du vêtement inférieur",\n'
+                '  "type_bas": "type de vêtement inférieur (ex. pantalon, jupe)",\n'
+                '  "sac": "Oui ou Non",\n'
+                '  "parapluie": "Oui ou Non"\n'
+                "}"
+            )
+        elif detection_type == "car":
+            prompt = (
+                "Analysez ce véhicule et extrayez les attributs suivants.\n"
+                "Répondez UNIQUEMENT en FRANÇAIS avec un objet JSON valide, sans balises Markdown ni explication :\n"
+                "{\n"
+                '  "type_de_vehicule": "type du véhicule (ex. berline, suv, camion, moto, autre)",\n'
+                '  "marque": "marque principale du véhicule",\n'
+                '  "couleur": "couleur principale de la carrosserie"\n'
+                "}"
+            )
+        else:
+            prompt = "Analysez cette image et renvoyez une description JSON en français."
+
+        payload = {
+            "model": "Qwen/Qwen3-VL-2B-Instruct",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+                        {"type": "text", "text": prompt}
+                    ]
+                }
+            ],
+            "max_tokens": 500,
+            "temperature": 0.1
+        }
+
+        headers = {"Content-Type": "application/json"}
+        if self.vlm_api_key:
+            headers["Authorization"] = f"Bearer {self.vlm_api_key}"
+
+        try:
+            resp = requests.post(self.vlm_url, json=payload, headers=headers, timeout=300)
+            resp.raise_for_status()
+            resp_json = resp.json()
+
+            if "choices" not in resp_json or len(resp_json["choices"]) == 0:
+                print("❌ Unexpected VLM response format:", resp_json)
+                return {"success": False, "error": "Unexpected VLM response format"}
+
+            raw_content = resp_json["choices"][0].get("message", {}).get("content", "")
+            # clean fenced code blocks like ```json ... ```
+            cleaned = re.sub(r"```(?:json)?\s*", "", str(raw_content))
+            cleaned = cleaned.replace("```", "").strip()
+
+            try:
+                attrs = json.loads(cleaned)
+                return {
+                    "success": True,
+                    "content": {
+                        "detection_type": detection_type,
+                        "attributes": attrs
+                    }
+                }
+            except json.JSONDecodeError:
+                print("❌ Failed to parse JSON from VLM response. Cleaned content:\n", cleaned)
+                return {
+                    "success": False,
+                    "content": {
+                        "detection_type": detection_type,
+                        "attributes": {}
+                    }
+                }
+
+        except requests.exceptions.Timeout:
+            return {"success": False, "error": "VLM request timed out"}
+        except requests.exceptions.HTTPError as e:
+            body = getattr(e, "response", None)
+            body_txt = body.text[:200] if body is not None else ""
+            print(f"HTTP error calling VLM: {e} — Response: {body_txt}")
+            return {"success": False, "error": f"HTTP error calling VLM: {e}"}
+        except requests.exceptions.RequestException as e:
+            return {"success": False, "error": f"Request error calling VLM: {e}"}
+    
+    
     def attributes_car(self, image: Image.Image) -> dict:
-        return self._call_nemotron(image, "car")
+        return self.__call_qwen(image, "car")
 
     def attributes_body(self, image: Image.Image) -> dict:
-        return self._call_nemotron(image, "body")
+        return self.__call_qwen(image, "body")
 
     def attributes_face(self, image: Image.Image) -> dict:
-        return self._call_nemotron(image, "face")
+        return self.__call_qwen(image, "face")
 
     def validate(self, image: Image.Image, class_name: str) -> dict:
         if class_name == "car":
