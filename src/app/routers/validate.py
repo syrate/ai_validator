@@ -2,7 +2,14 @@ import os
 
 from fastapi import APIRouter, HTTPException, Depends
 from anyio import to_thread
-from src.app.models import ValidateRequest, ValidateResponse, ValidatorResult, NvidiaAttributesRequest
+from src.app.models import (
+    ValidateRequest,
+    ValidateResponse,
+    ValidatorResult,
+    NvidiaAttributesRequest,
+    SafetyRecommendationsRequest,
+    SafetyRecommendationsResponse,
+)
 from src.app.utils.image_utils import decode_image, crop_image
 from src.app.validators.openai_validator import OpenAIValidator
 from src.app.validators.gemini_validator import GeminiValidator
@@ -112,6 +119,33 @@ async def validate_nvidia_attributes(req: NvidiaAttributesRequest):
 
         # return raw attributes
         return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected server error: {str(e)}")
+
+
+@router.post(
+    "/safety/recommendations",
+    response_model=SafetyRecommendationsResponse,
+    dependencies=[Depends(api_key_auth)],
+)
+async def safety_recommendations(req: SafetyRecommendationsRequest):
+    """Generate short, data-driven safety recommendations from aggregated
+    Safety Module performance metrics (violation counts/scores per category),
+    via Gemini. Always uses the Gemini validator regardless of ATTRIBUTES_VLM_PROVIDER.
+    """
+    try:
+        result = await to_thread.run_sync(
+            _gemini_validator.generate_safety_recommendations, req.model_dump()
+        )
+
+        if not isinstance(result, dict) or not result.get("success", False):
+            err = result.get("error", "Validator returned an error") if isinstance(result, dict) else "Invalid validator response"
+            raise HTTPException(status_code=500, detail=err)
+
+        return SafetyRecommendationsResponse(recommendations=result.get("recommendations", []))
 
     except HTTPException:
         raise

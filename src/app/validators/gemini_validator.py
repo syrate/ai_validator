@@ -65,6 +65,70 @@ class GeminiValidator(BaseValidator):
         except Exception as e:
             return {"success": False, "error": f"Unexpected error calling Gemini: {e}"}
 
+    def generate_safety_recommendations(self, metrics: dict) -> dict:
+        """Call Gemini to turn aggregated safety-performance metrics into short,
+        actionable recommendations. `metrics` is the same payload the Java backend
+        computes for the Safety Module radar chart (per-category violation counts
+        and scores for the current vs previous period).
+
+        Returns {"success": bool, "recommendations": [{"title":..., "description":...}]}
+        on success, or {"success": False, "error": ...} on failure.
+        """
+        prompt = (
+            "You are a workplace safety analyst for a video-surveillance platform. "
+            "Given the following real safety performance metrics for the period "
+            f"{metrics.get('period')}, write 3 to 6 short, specific, actionable "
+            "recommendations in French for a site safety manager. Each recommendation "
+            "must reference a concrete category and its violation count/trend from the "
+            "data below - do not invent generic advice unrelated to the data. If a "
+            "category has zero violations, do not mention it.\n\n"
+            f"Overall safety score: {metrics.get('overallScore')}/100 "
+            f"(previous period: {metrics.get('previousOverallScore')}/100)\n\n"
+            "Per-category data (category, label, current violations, previous violations, "
+            "current score, previous score):\n"
+        )
+        for cat in metrics.get("categories", []):
+            prompt += (
+                f"- {cat.get('label')}: {cat.get('currentViolations')} violations "
+                f"(previous period: {cat.get('previousViolations')}), "
+                f"score {cat.get('currentScore')}/100 "
+                f"(previous: {cat.get('previousScore')}/100)\n"
+            )
+        prompt += (
+            "\nReturn ONLY a JSON array, no markdown, no commentary, each element shaped as:\n"
+            '{"title": "<short title, max 6 words>", "description": "<one sentence>"}'
+        )
+
+        try:
+            response = self.client.models.generate_content(
+                model=self.base_model,
+                contents=[prompt],
+                config=types.GenerateContentConfig(temperature=0.4),
+            )
+            raw_output = response.text
+            if not raw_output:
+                return {"success": False, "error": "Empty response from Gemini"}
+
+            cleaned = re.sub(r"```(?:json)?\s*", "", raw_output)
+            cleaned = cleaned.replace("```", "").strip()
+
+            try:
+                parsed = json.loads(cleaned)
+            except json.JSONDecodeError:
+                return {"success": False, "error": f"Invalid JSON from Gemini: {cleaned[:200]}"}
+
+            if not isinstance(parsed, list):
+                return {"success": False, "error": "Gemini did not return a JSON array"}
+
+            recommendations = [
+                {"title": item.get("title", ""), "description": item.get("description", "")}
+                for item in parsed
+                if isinstance(item, dict) and item.get("title") and item.get("description")
+            ]
+            return {"success": True, "recommendations": recommendations}
+        except Exception as e:
+            return {"success": False, "error": f"Unexpected error calling Gemini: {e}"}
+
     def attributes_car(self, image: Image.Image) -> dict:
         return self._call_gemini_attributes(image, "car")
 
