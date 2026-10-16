@@ -29,3 +29,28 @@ class ValidatorResult(BaseModel):
 
 class ValidateResponse(RootModel[Dict[str, ValidatorResult]]):
     root: Dict[str, ValidatorResult]
+
+
+class SafetyPerformanceCategoryMetric(BaseModel):
+    category: str
+    label: str
+    currentScore: int
+    previousScore: int
+    currentViolations: int
+    previousViolations: int
+
+
+class SafetyRecommendationsRequest(BaseModel):
+    period: str
+    overallScore: int
+    previousOverallScore: int
+    categories: List[SafetyPerformanceCategoryMetric]
+
+
+class SafetyRecommendation(BaseModel):
+    title: str
+    description: str
+
+
+class SafetyRecommendationsResponse(BaseModel):
+    recommendations: List[SafetyRecommendation]
