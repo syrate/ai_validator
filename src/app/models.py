@@ -54,3 +54,17 @@ class SafetyRecommendation(BaseModel):
 
 class SafetyRecommendationsResponse(BaseModel):
     recommendations: List[SafetyRecommendation]
+
+
+class AlertValidationRequest(BaseModel):
+    video_base64: str
+    detection_label: str          # e.g. "Person Running" — what the box/rule claims happened
+    detection_metadata: Optional[Dict] = None   # raw dynamic_data, passed through as context
+    system_prompt: str            # the tenancy's configured validation_system_prompt (may be empty)
+
+
+class AlertValidationResponse(BaseModel):
+    confirmed: bool
+    confidence: int = Field(..., ge=1, le=100)
+    severity: Literal["UNKNOWN", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
+    reasoning: str
