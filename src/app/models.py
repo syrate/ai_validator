@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field ,RootModel
-from typing import List, Literal, Optional, Dict
+from typing import Any, List, Literal, Optional, Dict
 
 class BBox(BaseModel):
     x: int
@@ -59,7 +59,7 @@ class SafetyRecommendationsResponse(BaseModel):
 class AlertValidationRequest(BaseModel):
     video_base64: str
     detection_label: str          # e.g. "Person Running" — what the box/rule claims happened
-    detection_metadata: Optional[Dict] = None   # raw dynamic_data, passed through as context
+    detection_metadata: Optional[Any] = None   # raw dynamic_data (list or dict), passed through as context
     system_prompt: str            # the tenancy's configured validation_system_prompt (may be empty)
 
 
