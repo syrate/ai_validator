@@ -1,3 +1,4 @@
+import base64
 import os
 
 from fastapi import APIRouter, HTTPException, Depends
@@ -9,6 +10,8 @@ from src.app.models import (
     NvidiaAttributesRequest,
     SafetyRecommendationsRequest,
     SafetyRecommendationsResponse,
+    AlertValidationRequest,
+    AlertValidationResponse,
 )
 from src.app.utils.image_utils import decode_image, crop_image
 from src.app.validators.openai_validator import OpenAIValidator
@@ -120,6 +123,55 @@ async def validate_nvidia_attributes(req: NvidiaAttributesRequest):
         # return raw attributes
         return result
 
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected server error: {str(e)}")
+
+
+MAX_ALERT_VIDEO_BYTES = 25 * 1024 * 1024  # 25MB
+
+
+@router.post(
+    "/validate/alert",
+    response_model=AlertValidationResponse,
+    dependencies=[Depends(api_key_auth)],
+)
+async def validate_alert(req: AlertValidationRequest):
+    """Ask Gemini to watch a detection's video clip and decide whether the
+    flagged event really happened, plus assign it a severity, given the
+    tenancy's configured system prompt.
+    """
+    try:
+        try:
+            video_bytes = base64.b64decode(req.video_base64)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Video decoding error: {str(e)}")
+
+        if len(video_bytes) > MAX_ALERT_VIDEO_BYTES:
+            raise HTTPException(status_code=413, detail="Decoded video exceeds the 25MB limit")
+
+        try:
+            result = await to_thread.run_sync(
+                _gemini_validator.validate_alert_with_video,
+                video_bytes,
+                req.detection_label,
+                req.detection_metadata,
+                req.system_prompt,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Validator execution error: {str(e)}")
+
+        if not isinstance(result, dict) or not result.get("success", False):
+            err = result.get("error", "Validator returned an error") if isinstance(result, dict) else "Invalid validator response"
+            raise HTTPException(status_code=500, detail=err)
+
+        return AlertValidationResponse(
+            confirmed=result["confirmed"],
+            confidence=result["confidence"],
+            severity=result["severity"],
+            reasoning=result["reasoning"],
+        )
     except HTTPException:
         raise
     except Exception as e:

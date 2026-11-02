@@ -65,6 +65,110 @@ class GeminiValidator(BaseValidator):
         except Exception as e:
             return {"success": False, "error": f"Unexpected error calling Gemini: {e}"}
 
+    def validate_alert_with_video(
+        self,
+        video_bytes: bytes,
+        detection_label: str,
+        detection_metadata: dict | None,
+        system_prompt: str,
+    ) -> dict:
+        """Ask Gemini to watch a detection's video clip and decide whether the
+        flagged event really happened, plus assign it a severity.
+
+        `detection_label` is what the upstream rule/detector claims happened
+        (e.g. "Person Running"); `detection_metadata` is the raw dynamic_data
+        passed through as extra context; `system_prompt` is the tenancy's
+        configured validation_system_prompt and may be empty.
+
+        Returns {"success": True, "confirmed": bool, "confidence": int,
+        "severity": str, "reasoning": str} on success, or
+        {"success": False, "error": ...} on failure, matching the existing
+        validator error-envelope convention.
+        """
+        instruction = (
+            "You are an AI alert-validation assistant for a video-surveillance platform. "
+            "You are given a short video clip and metadata describing a detection that an "
+            "automated rule flagged as an alert. Watch the video carefully and decide "
+            "whether the described event actually happened, and how severe it is.\n\n"
+            "Respond with ONLY a JSON object (no markdown, no commentary) with exactly "
+            "these fields:\n"
+            "{\n"
+            '  "confirmed": <true or false, whether the event really happened>,\n'
+            '  "confidence": <integer 1-100, your confidence in this judgement>,\n'
+            '  "severity": <one of "UNKNOWN", "LOW", "MEDIUM", "HIGH", "CRITICAL">,\n'
+            '  "reasoning": <short string explaining your decision>\n'
+            "}"
+        )
+
+        context_lines = [f'detection_label: "{detection_label}"']
+        if detection_metadata:
+            context_lines.append(f"detection_metadata: {json.dumps(detection_metadata)}")
+        context = "\n".join(context_lines)
+
+        prompt_parts = [instruction]
+        if system_prompt and system_prompt.strip():
+            prompt_parts.append(system_prompt.strip())
+        prompt_parts.append(context)
+        prompt = "\n\n".join(prompt_parts)
+
+        try:
+            video_part = types.Part.from_bytes(data=video_bytes, mime_type="video/mp4")
+            response = self.client.models.generate_content(
+                model=self.base_model,
+                contents=[prompt, video_part],
+                config=types.GenerateContentConfig(temperature=0.2),
+            )
+            raw_output = response.text
+            if not raw_output:
+                return {"success": False, "error": "Empty response from Gemini"}
+
+            cleaned = re.sub(r"```(?:json)?\s*", "", raw_output)
+            cleaned = cleaned.replace("```", "").strip()
+
+            try:
+                parsed = json.loads(cleaned)
+            except json.JSONDecodeError:
+                return {"success": False, "error": f"Invalid JSON from Gemini: {cleaned[:200]}"}
+
+            if not isinstance(parsed, dict):
+                return {"success": False, "error": "Gemini did not return a JSON object"}
+
+            required_fields = {"confirmed", "confidence", "severity", "reasoning"}
+            if not required_fields.issubset(parsed.keys()):
+                return {
+                    "success": False,
+                    "error": f"Missing required fields in Gemini response: {cleaned[:200]}",
+                }
+
+            confirmed = parsed.get("confirmed")
+            if not isinstance(confirmed, bool):
+                return {"success": False, "error": "Gemini response 'confirmed' field is not a boolean"}
+
+            try:
+                confidence = int(parsed.get("confidence"))
+            except (TypeError, ValueError):
+                return {"success": False, "error": "Gemini response 'confidence' field is not an integer"}
+            if not (1 <= confidence <= 100):
+                return {"success": False, "error": "Gemini response 'confidence' field out of range 1-100"}
+
+            severity = parsed.get("severity")
+            if severity not in {"UNKNOWN", "LOW", "MEDIUM", "HIGH", "CRITICAL"}:
+                return {"success": False, "error": f"Gemini response 'severity' field invalid: {severity!r}"}
+
+            reasoning = parsed.get("reasoning")
+            if not isinstance(reasoning, str):
+                return {"success": False, "error": "Gemini response 'reasoning' field is not a string"}
+
+            return {
+                "success": True,
+                "confirmed": confirmed,
+                "confidence": confidence,
+                "severity": severity,
+                "reasoning": reasoning,
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Unexpected error calling Gemini: {e}"}
+
     def generate_safety_recommendations(self, metrics: dict) -> dict:
         """Call Gemini to turn aggregated safety-performance metrics into short,
         actionable recommendations. `metrics` is the same payload the Java backend
